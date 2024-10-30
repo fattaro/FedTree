@@ -45,9 +45,9 @@ void Partition::homo_partition(const DataSet &dataset, const int n_parties, cons
     //for vertical FL, the features are not shuffled so that the feature id of the test dataset is consistent with the training dataset.
     if(is_horizontal)
         std::shuffle(idxs.begin(), idxs.end(), e);
-//    std::random_shuffle(idxs.begin(), idxs.end());
+    // std::random_shuffle(idxs.begin(), idxs.end());
 
-//    std::map<int, vector<int>> batch_idxs;
+    // std::map<int, vector<int>> batch_idxs;
 
     int stride = n / n_parties;
     for (int i = 0; i < n_parties - 1; i++) {
@@ -81,7 +81,7 @@ void Partition::homo_partition(const DataSet &dataset, const int n_parties, cons
             int part_id = i;
             int party_id = part2party[part_id];
             subsets[party_id].y.push_back(dataset.y[i]);
-//            subsets[party_id].label.push_back(dataset.label[i]);
+            // subsets[party_id].label.push_back(dataset.label[i]);
 
             for(int j = dataset.csr_row_ptr[i]; j < dataset.csr_row_ptr[i+1]; j ++) { // for each element in the row
                 float_type value = dataset.csr_val[j];

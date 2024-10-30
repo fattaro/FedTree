@@ -20,6 +20,7 @@
 #include <iterator>
 #include <algorithm>
 #include <random>
+#include <vector>
 
 using namespace thrust;
 
@@ -77,7 +78,7 @@ void HistTreeBuilder::set_gradients(SyncArray<GHPair> &gh) {
 //}
 
 void HistTreeBuilder::get_bin_ids() {
-//    SparseColumns &columns = shards[device_id].columns;
+    // SparseColumns &columns = shards[device_id].columns;
     HistCut &cut = this->cut;
     auto &dense_bin_id = this->dense_bin_id;
     using namespace thrust;
@@ -106,7 +107,7 @@ void HistTreeBuilder::get_bin_ids() {
         };
         TIMED_SCOPE(timerObj, "binning");
 
-#pragma omp parallel for
+        #pragma omp parallel for
         for (int cid = 0; cid < n_column; cid++) {
             for (int i = csc_col_ptr_data[cid]; i < csc_col_ptr_data[cid + 1]; i++) {
                 auto search_begin = cut_points_ptr + cut_col_ptr[cid];
@@ -1014,7 +1015,7 @@ void HistTreeBuilder::compute_histogram_in_a_node(SyncArray<GHPair> &gradients, 
 
 void HistTreeBuilder::merge_histograms_server_propose(SyncArray<GHPair> &merged_hist, SyncArray<GHPair> &merged_missing_gh) {
     int n_bins = parties_hist[0].size();
-    CHECK_EQ(parties_hist[0].size(), parties_hist[1].size());
+    // CHECK_EQ(parties_hist[0].size(), parties_hist[1].size());
     int n_size = parties_missing_gh[0].size();
     merged_hist.resize(n_bins);
     merged_missing_gh.resize(n_size);
@@ -1041,6 +1042,50 @@ void HistTreeBuilder::merge_histograms_server_propose(SyncArray<GHPair> &merged_
         //thrust::transform(merged_missing_gh_data, merged_missing_gh_data + n_size,
         //        missing_gh_data, merged_missing_gh_data, thrust::plus<GHPair>());
 #pragma omp parallel for
+        for (int j = 0; j < n_size; j++) {
+            GHPair &missing_gh = missing_gh_data[j];
+            GHPair &missing_gh_dest = merged_missing_gh_data[j];
+            missing_gh_dest = missing_gh_dest + missing_gh;
+        }
+    }
+
+//    hist.resize(n_bins);
+//    hist.copy_from(merged_hist);
+//   // LOG(INFO) << "MERGE HIST: " << last_hist;
+//    missing_gh.resize(n_size);
+//    missing_gh.copy_from(merged_missing_gh);
+//    last_hist.resize(n_bins);
+//    last_hist.copy_from(merged_hist);
+}
+
+void HistTreeBuilder::merge_histograms_server_propose_selected(SyncArray<GHPair> &merged_hist, SyncArray<GHPair> &merged_missing_gh, vector<int> &selected_party) {
+    int n_bins = parties_hist[0].size();
+    // CHECK_EQ(parties_hist[0].size(), parties_hist[1].size());
+    int n_size = parties_missing_gh[0].size();
+    merged_hist.resize(n_bins);
+    merged_missing_gh.resize(n_size);
+//    SyncArray<GHPair> merged_hist(n_bins);
+//    SyncArray<GHPair> merged_missing_gh(n_size);
+    auto merged_hist_data = merged_hist.host_data();
+    auto merged_missing_gh_data = merged_missing_gh.host_data();
+
+    for (int i = 0; i < selected_party.size(); i++) {
+        auto hist_data = parties_hist[selected_party[i]].host_data();
+        int n_bins = parties_hist[selected_party[i]].size();
+
+        #pragma omp parallel for
+        for (int j = 0; j < n_bins; j++) {  
+            GHPair &src = hist_data[j];
+            GHPair &hist_dest = merged_hist_data[j];
+            hist_dest = hist_dest + src;
+        }
+    }
+
+    for (int i = 0; i < selected_party.size(); i++) {
+        auto missing_gh_data =  parties_missing_gh[selected_party[i]].host_data();
+        //thrust::transform(merged_missing_gh_data, merged_missing_gh_data + n_size,
+        //        missing_gh_data, merged_missing_gh_data, thrust::plus<GHPair>());
+        #pragma omp parallel for
         for (int j = 0; j < n_size; j++) {
             GHPair &missing_gh = missing_gh_data[j];
             GHPair &missing_gh_dest = merged_missing_gh_data[j];

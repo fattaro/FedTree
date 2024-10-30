@@ -4,23 +4,36 @@
 #include "FedTree/FL/FLtrainer.h"
 #include "FedTree/FL/partition.h"
 #include "FedTree/FL/comm_helper.h"
+#include "FedTree/common.h"
+#include "FedTree/syncarray.h"
+#include "thrust/for_each.h"
 #include "thrust/sequence.h"
 #include "thrust/reduce.h"
 #include "thrust/execution_policy.h"
+#include <algorithm>
 #include <limits>
 #include <cmath>
+#include <numeric>
+#include <random>
+#include <string>
+#include <vector>
 
 using namespace thrust;
 void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FLParam &params) {
-    LOG(INFO) << "Start horizontal training";
+    // LOG(INFO) << "Start horizontal training";
     std::chrono::high_resolution_clock timer;
     auto t_start = timer.now();
     auto start = t_start;
     auto model_param = params.gbdt_param;
-    Party &aggregator = (params.merge_histogram == "client")? parties[0] : server;
+
+    // 构建直方图
+    // LOG(INFO) << "Initialize histogram";
+    // LOG(INFO) << "params.merge_histogram = " << params.merge_histogram;
+    Party &aggregator = (params.merge_histogram == "client")? parties[0] : server;  // aggregator = server
     int n_parties = parties.size();
     aggregator.booster.fbuilder->parties_hist_init(n_parties);
 
+    // 加密
     std::vector<float> encryption_time (n_parties, 0.0f);
     float decryption_time = 0.0f;
     if (params.privacy_tech == "he") {
@@ -35,9 +48,9 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
     }
     else if(params.privacy_tech == "sa"){
         LOG(INFO)<<"Start SA init";
-//        server.dh.primegen();
+        // server.dh.primegen();
         for(int i = 0; i < n_parties; i++){
-//            parties[i].dh = server.dh;
+            // parties[i].dh = server.dh;
             parties[i].dh.generate_public_key();
         }
         for(int i = 0; i < n_parties; i++){
@@ -59,9 +72,11 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
         LOG(INFO) << "End of DP init";
     }
     
-    // Generate HistCut by server or each party
+    // Generate HistCut by server or each party 生成直方图分割
+    // LOG(INFO) << "Generate HistCut by server or each party";
     int n_bins = model_param.max_num_bin;
     if (params.propose_split == "server") {
+        // 服务器分割 从所有party中找到每个特征的最大最小值
         // loop through all party to find max and min for each feature
         float inf = std::numeric_limits<float>::infinity();
         vector<vector<float_type>> feature_range(parties[0].get_num_feature());
@@ -86,8 +101,8 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
 
     } else if (params.propose_split == "party" || params.propose_split == "client" || params.propose_split == "client_pre" || params.propose_split == "client_post") {
         for (int p = 0; p < n_parties; p++) {
-//            auto dataset = parties[p].dataset;
-//            parties[p].booster.fbuilder->cut.get_cut_points_fast(dataset, n_bins, dataset.n_instances());
+            // auto dataset = parties[p].dataset;
+            // parties[p].booster.fbuilder->cut.get_cut_points_fast(dataset, n_bins, dataset.n_instances());
             server.booster.fbuilder->append_to_parties_cut(parties[p].booster.fbuilder->cut, p);
         }
         server.booster.fbuilder->cut.get_cut_points_by_parties_cut_sampling(server.booster.fbuilder->parties_cut, n_bins);
@@ -196,14 +211,17 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
     auto t_end = timer.now();
     std::chrono::duration<float> used_time = t_end - t_start;
     LOG(DEBUG) << "Initialization using time: " << used_time.count() << " s";
+    // LOG(INFO) << "Initialization using time: " << used_time.count() << " s";
     t_start = t_end;
 
-    for (int i = 0; i < params.gbdt_param.n_trees; i++) {
-        LOG(INFO) << "Training round " << i << " start";
+    // 训练
+    for (int i = 0; i < params.gbdt_param.n_trees; i++) {   // 每轮
+        // LOG(INFO) << "================ Training round " << i << " start ================";
         int n_tree_this_round;
         n_tree_this_round = params.gbdt_param.tree_per_round;
         vector<Tree> trees_this_round;
         trees_this_round.resize(n_tree_this_round);
+
         // each party sample the data to train a tree in each round
         if(params.ins_bagging_fraction < 1.0){
             if(i % int(1/params.ins_bagging_fraction) == 0){
@@ -216,13 +234,14 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
                 parties[pid].booster.init(parties[pid].dataset, params.gbdt_param);
                 parties[pid].booster.fbuilder->set_cut(server.booster.fbuilder->cut);
                 parties[pid].booster.fbuilder->get_bin_ids();
-//                SyncArray<float_type> y_predict = parties[pid].booster.fbuilder->get_y_predict();
+                //SyncArray<float_type> y_predict = parties[pid].booster.fbuilder->get_y_predict();
                 //reset y_predict
                 if(i!=0)
                     parties[pid].gbdt.predict_raw(params.gbdt_param, parties[pid].dataset,
                                                 parties[pid].booster.fbuilder->get_y_predict());
             }
         }
+
         GHPair sum_gh;
         for (int pid = 0; pid < n_parties; pid++) {
             parties[pid].booster.update_gradients();
@@ -236,9 +255,10 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
             GHPair party_gh = thrust::reduce(thrust::host, parties[pid].booster.gradients.host_data(), parties[pid].booster.gradients.host_end());
             sum_gh = sum_gh + party_gh;
         }
+
         // for each tree per round
-        for (int k = 0; k < n_tree_this_round; k++) {
-//            Tree &tree = trees[k];
+        for (int k = 0; k < n_tree_this_round; k++) {   // 该轮的每棵树
+            // Tree &tree = trees[k];
             // each party initialize ins2node_id, gradients, etc.
             // ask parties to send gradient and aggregate by server
             #pragma omp parallel for
@@ -251,11 +271,12 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
             used_time = t_end - t_start;
             LOG(DEBUG) << "Initializing builder using time: " << used_time.count() << " s";
             t_start = t_end;
+
             // for each level
-           // LOG(INFO) << "Level " << k;
-            for (int d = 0; d < params.gbdt_param.depth; d++) {
+            for (int d = 0; d < params.gbdt_param.depth; d++) {     // 每层
                 int n_nodes_in_level = 1 << d;
                 int n_max_nodes = 2 << model_param.depth;
+                // LOG(INFO) << "level " << d+1;
                 MSyncArray<int> parties_hist_fid(n_parties);
 
                 // Each Party Compute Histogram
@@ -272,8 +293,10 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
                         parties[i].dh.decrypt_noises();
                     }
                 }
+
+                // 每个party计算直方图，并发送给服务器
                 #pragma omp parallel for
-                for (int j = 0; j < n_parties; j++) {
+                for (int j = 0; j < n_parties; j++) {   // 每个party计算直方图
                     int n_column = parties[j].dataset.n_features();
                     int n_partition = n_column * n_nodes_in_level;
                     int n_bins = parties[j].booster.fbuilder->cut.cut_points_val.size();
@@ -329,16 +352,15 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
                 n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
                 int n_max_splits = n_max_nodes * n_bins;
                 if (params.propose_split == "server" || params.propose_split == "client_pre" || params.propose_split == "party") {
-//                    if (params.privacy_tech == "he") {
-//                        hist.resize(aggregator.booster.fbuilder->parties_hist[0].size());
-//                        missing_gh.resize(aggregator.booster.fbuilder->parties_missing_gh[0].size());
-//                        aggregator.encrypt_histogram(hist);
-//                        aggregator.encrypt_histogram(missing_gh);
-//
-//                    }
+                    // if (params.privacy_tech == "he") {
+                    //     hist.resize(aggregator.booster.fbuilder->parties_hist[0].size());
+                    //     missing_gh.resize(aggregator.booster.fbuilder->parties_missing_gh[0].size());
+                    //     aggregator.encrypt_histogram(hist);
+                    //     aggregator.encrypt_histogram(missing_gh);
+                    // }
                     aggregator.booster.fbuilder->merge_histograms_server_propose(hist, missing_gh);
-//                    server.booster.fbuilder->set_last_missing_gh(missing_gh);
-//                    LOG(INFO) << hist;
+                    // server.booster.fbuilder->set_last_missing_gh(missing_gh);
+                    // LOG(INFO) << hist;
                 }else if (params.propose_split == "client_post") {
                     vector<vector<vector<float_type>>> feature_range_for_client(parties[0].get_num_feature());
                     for (int n = 0; n < parties[0].get_num_feature(); n++) {
@@ -348,12 +370,12 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
                             feature_range_for_client[n][p] = temp;
                         }
                     }
-//                    if(params.privacy_tech == "he"){
-//                        hist.resize(n_max_splits);
-//                        missing_gh.resize(aggregator.booster.fbuilder->parties_missing_gh[0].size());
-//                        aggregator.encrypt_histogram(hist);
-//                        aggregator.encrypt_histogram(missing_gh);
-//                    }
+                    // if(params.privacy_tech == "he"){
+                    //     hist.resize(n_max_splits);
+                    //     missing_gh.resize(aggregator.booster.fbuilder->parties_missing_gh[0].size());
+                    //     aggregator.encrypt_histogram(hist);
+                    //     aggregator.encrypt_histogram(missing_gh);
+                    // }
                     aggregator.booster.fbuilder->merge_histograms_client_propose(hist, missing_gh, feature_range_for_client, n_max_splits);
                 }
                 n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
@@ -378,25 +400,27 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
                 // server find the best gain and its index
                 SyncArray <int_float> best_idx_gain(n_nodes_in_level);
                 if(params.privacy_tech == "dp"){
-//                    SyncArray<float_type> prob_exponent(n_max_splits);    //the exponent of probability mass for each split point
-//                    dp_manager.compute_split_point_probability(gain, prob_exponent);
-//                    dp_manager.exponential_select_split_point(prob_exponent, gain, best_idx_gain, n_nodes_in_level, n_bins);
+                    // SyncArray<float_type> prob_exponent(n_max_splits);    //the exponent of probability mass for each split point
+                    // dp_manager.compute_split_point_probability(gain, prob_exponent);
+                    // dp_manager.exponential_select_split_point(prob_exponent, gain, best_idx_gain, n_nodes_in_level, n_bins);
 
                     server.booster.fbuilder->get_best_gain_in_a_level(gain, best_idx_gain, n_nodes_in_level, n_bins);
                 }
                 else
                     server.booster.fbuilder->get_best_gain_in_a_level(gain, best_idx_gain, n_nodes_in_level, n_bins);
                 LOG(DEBUG) << "BEST_IDX_GAIN:" << best_idx_gain;
+                // LOG(INFO) << "BEST_IDX_GAIN:" << best_idx_gain;
 
                 server.booster.fbuilder->get_split_points(best_idx_gain, n_nodes_in_level, hist_fid_data, missing_gh, hist);
-                LOG(DEBUG) << "SP" << server.booster.fbuilder->sp;
+                // LOG(DEBUG) << "SP" << server.booster.fbuilder->sp;
+                // LOG(INFO) << "SP" << server.booster.fbuilder->sp;
                 server.booster.fbuilder->update_tree();
 
                 trees_this_round[k] = server.booster.fbuilder->get_tree();
                 #pragma omp parallel for
                 for (int j = 0; j < n_parties; j++) {
-//                    parties_trees[j][k] = server.booster.fbuilder->get_tree();
-//                    parties[j].booster.fbuilder->set_tree(parties_trees[j][k]);
+                    // parties_trees[j][k] = server.booster.fbuilder->get_tree();
+                    // parties[j].booster.fbuilder->set_tree(parties_trees[j][k]);
                     parties[j].booster.fbuilder->set_tree(trees_this_round[k]);
                     parties[j].booster.fbuilder->update_ins2node_id();
                 }
@@ -409,22 +433,22 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
                     }
                 }
                 if (!split_further) {
-//                    if (params.privacy_tech == "dp") {
-//                        for (int party_id = 0; party_id < parties.size(); party_id++) {
-//                            int tree_size = parties[party_id].booster.fbuilder->trees.nodes.size();
-//                            auto nodes = parties[party_id].booster.fbuilder->trees.nodes.host_data();
-//                            for (int node_id = 0; node_id < tree_size; node_id++) {
-//                                Tree::TreeNode node = nodes[node_id];
-//                                if (node.is_leaf) {
-//                                    // add noises
-//                                    dp_manager.laplace_add_noise(node);
-//                                }
-//                            }
-//                        }
-//                    }
+                    // if (params.privacy_tech == "dp") {
+                    //     for (int party_id = 0; party_id < parties.size(); party_id++) {
+                    //         int tree_size = parties[party_id].booster.fbuilder->trees.nodes.size();
+                    //         auto nodes = parties[party_id].booster.fbuilder->trees.nodes.host_data();
+                    //         for (int node_id = 0; node_id < tree_size; node_id++) {
+                    //             Tree::TreeNode node = nodes[node_id];
+                    //             if (node.is_leaf) {
+                    //                 // add noises
+                    //                 dp_manager.laplace_add_noise(node);
+                    //             }
+                    //         }
+                    //     }
+                    // }
                     break;
                 }
-            }
+            }   // end 每层
 
             t_end = timer.now();
             used_time = t_end - t_start;
@@ -446,23 +470,26 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
             used_time = t_end - t_start;
             LOG(DEBUG) << "Pruning tree using time: " << used_time.count() << " s";
             t_start = t_end;
-        }
+        }   // end 一轮每棵树
+
+        // 更新GBDT模型
         #pragma omp parallel for
         for (int p = 0; p < n_parties; p++) {
-//            parties[p].gbdt.trees.push_back(parties_trees[p]);
+            // parties[p].gbdt.trees.push_back(parties_trees[p]);
             parties[p].gbdt.trees.push_back(trees_this_round);
         }
         server.global_trees.trees.push_back(trees_this_round);
-       // LOG(INFO) <<  "Y_PREDICT" << parties[0].booster.fbuilder->get_y_predict();
-       float score = 0.0;
-       for (int p = 0; p < n_parties; p++){
+        // LOG(INFO) <<  "Y_PREDICT" << parties[0].booster.fbuilder->get_y_predict();
+        float score = 0.0;
+        for (int p = 0; p < n_parties; p++){
            score += parties[p].booster.metric->get_score(parties[p].booster.fbuilder->get_y_predict());
-       }
-       score /= n_parties;
-
-       LOG(INFO) << "averaged " << parties[0].booster.metric->get_name() << " = "
-                  << score;
-        LOG(INFO) << "Training round " << i << " end";
+        }
+        // LOG(INFO) << "score" << score;
+        score /= n_parties;
+        if (params.gbdt_param.n_trees == (i + 1)){
+            LOG(INFO) << "averaged " << parties[0].booster.metric->get_name() << " = " << score;
+        }
+        // LOG(INFO) << "================ Training round " << i << " end ================";
     }
     auto t_stop = timer.now();
     std::chrono::duration<float> training_time = t_stop - start;
@@ -473,6 +500,922 @@ void FLtrainer::horizontal_fl_trainer(vector<Party> &parties, Server &server, FL
                 << encryption_time[i] << "/" << decryption_time << ")";
         }
         LOG(INFO) << "avg HE time " << std::accumulate(encryption_time.begin(), encryption_time.end(), 0.0)/n_parties + decryption_time;
+    }
+
+    // LOG(INFO) << "end of training";
+}
+
+void FLtrainer::horizontal_fl_trainer_streamline(vector<Party> &parties, Server &server, FLParam &params) {
+    // LOG(INFO) << "Start horizontal training";
+    std::chrono::high_resolution_clock timer;
+    auto t_start = timer.now();
+    auto start = t_start;
+    auto model_param = params.gbdt_param;
+
+    // 构建直方图
+    // LOG(INFO) << "Initialize histogram";
+    // LOG(INFO) << "params.merge_histogram = " << params.merge_histogram;
+    Party &aggregator = (params.merge_histogram == "client")? parties[0] : server;  // aggregator = server
+    int n_parties = parties.size();
+    aggregator.booster.fbuilder->parties_hist_init(n_parties);
+    
+    // Generate HistCut by server or each party 生成直方图分割
+    // LOG(INFO) << "Generate HistCut by server or each party";
+    int n_bins = model_param.max_num_bin;
+    if (params.propose_split == "server") {
+        // 服务器分割 从所有party中找到每个特征的最大最小值
+        // loop through all party to find max and min for each feature
+        float inf = std::numeric_limits<float>::infinity();
+        vector<vector<float_type>> feature_range(parties[0].get_num_feature());
+        for (int n = 0; n < parties[0].get_num_feature(); n++) {
+            vector<float_type> min_max = {inf, -inf};
+            for (int p = 0; p < n_parties; p++) {
+                vector<float_type> temp = parties[p].get_feature_range_by_feature_index(n);
+                if (temp[0] <= min_max[0])
+                    min_max[0] = temp[0];
+                if (temp[1] >= min_max[1])
+                    min_max[1] = temp[1];
+            }
+            feature_range[n] = min_max;
+        }
+        // once we have feature_range, we can generate cut points
+        server.booster.fbuilder->cut.get_cut_points_by_feature_range(feature_range, n_bins);
+
+        for (int p = 0; p < n_parties; p++) {
+            parties[p].booster.fbuilder->set_cut(server.booster.fbuilder->cut);
+            parties[p].booster.fbuilder->get_bin_ids();
+        }
+
+    }
+    auto t_end = timer.now();
+    std::chrono::duration<float> used_time = t_end - t_start;
+    LOG(DEBUG) << "Initialization using time: " << used_time.count() << " s";
+    // LOG(INFO) << "Initialization using time: " << used_time.count() << " s";
+    t_start = t_end;
+
+    // 训练
+    for (int i = 0; i < params.gbdt_param.n_trees; i++) {   // 每轮
+        LOG(INFO) << "================ Training round " << i << " start ================";
+        int n_tree_this_round;
+        n_tree_this_round = params.gbdt_param.tree_per_round;
+        vector<Tree> trees_this_round;
+        trees_this_round.resize(n_tree_this_round);
+
+        GHPair sum_gh;
+        for (int pid = 0; pid < n_parties; pid++) {
+            parties[pid].booster.update_gradients();
+
+            GHPair party_gh = thrust::reduce(thrust::host, parties[pid].booster.gradients.host_data(), parties[pid].booster.gradients.host_end());
+            sum_gh = sum_gh + party_gh;
+        }
+
+        // for each tree per round
+        for (int k = 0; k < n_tree_this_round; k++) {   // 该轮的每棵树
+            #pragma omp parallel for
+            for (int pid = 0; pid < n_parties; pid++) {
+                parties[pid].booster.fbuilder->build_init(parties[pid].booster.gradients, k);
+            }
+            server.booster.fbuilder->build_init(sum_gh, k);
+
+            t_end = timer.now();
+            used_time = t_end - t_start;
+            LOG(DEBUG) << "Initializing builder using time: " << used_time.count() << " s";
+            t_start = t_end;
+
+            // for each level
+            for (int d = 0; d < params.gbdt_param.depth; d++) {     // 每层
+                int n_nodes_in_level = 1 << d;
+                int n_max_nodes = 2 << model_param.depth;
+                // LOG(INFO) << "level " << n_nodes_in_level;
+                MSyncArray<int> parties_hist_fid(n_parties);
+
+                // Each Party Compute Histogram
+                // each party compute hist, send hist to server or party
+                // 每个party计算直方图，并发送给服务器
+                vector<SyncArray<GHPair>> missing_gh_list(n_parties);
+                vector<SyncArray<GHPair>> hist_list(n_parties);
+                #pragma omp parallel for
+                for (int j = 0; j < n_parties; j++) {   // 每个party计算直方图
+                    int n_column = parties[j].dataset.n_features();
+                    int n_partition = n_column * n_nodes_in_level;
+                    int n_bins = parties[j].booster.fbuilder->cut.cut_points_val.size();
+                    auto cut_fid_data = parties[j].booster.fbuilder->cut.cut_fid.host_data();
+                    int n_max_splits = n_max_nodes * n_bins;
+                    int n_splits = n_nodes_in_level * n_bins;
+                    SyncArray<int> hist_fid(n_splits);
+                    auto hist_fid_data = hist_fid.host_data();
+
+                    for (int i = 0; i < hist_fid.size(); i++)
+                        hist_fid_data[i] = cut_fid_data[i % n_bins];
+
+                    parties_hist_fid[j].resize(n_nodes_in_level * n_bins);
+                    parties_hist_fid[j].copy_from(hist_fid);
+
+                    SyncArray <GHPair> missing_gh(n_partition);
+                    SyncArray <GHPair> hist(n_splits);
+                    parties[j].booster.fbuilder->compute_histogram_in_a_level(d, n_max_splits, n_bins,
+                                                                              n_nodes_in_level,
+                                                                              hist_fid_data, missing_gh, hist);
+                    // LOG(INFO) << "hist: " << hist;
+                    // LOG(INFO) << "missing_gh" << missing_gh;
+
+                    missing_gh_list[j].resize(n_partition);
+                    hist_list[j].resize(n_splits);
+                    missing_gh_list[j].copy_from(missing_gh);
+                    hist_list[j].copy_from(hist);
+
+                    t_end = timer.now();
+                    used_time = t_end - t_start;
+                    LOG(DEBUG) << "Computing histogram using time: " << used_time.count() << " s";
+                    // LOG(INFO) << "Computing histogram using time: " << used_time.count() << " s";
+                    t_start = t_end;
+
+                    // 服务器聚合直方图
+                    aggregator.booster.fbuilder->append_hist(hist, missing_gh, n_partition, n_splits, j);
+
+                    t_end = timer.now();
+                    used_time = t_end - t_start;
+                    LOG(DEBUG) << "Appending histogram using time: " << used_time.count() << " s";
+                    // LOG(INFO) << "Appending histogram using time: " << used_time.count() << " s";
+                    t_start = t_end;
+                }
+                // Now we have the array of hist and missing_gh
+                // LOG(INFO) << hist_list.size() << "\n" << hist_list;
+                // LOG(INFO) << missing_gh_list.size() << "\n" << missing_gh_list;
+
+                SyncArray <GHPair> missing_gh;
+                SyncArray <GHPair> hist;
+                // set these parameters to fit merged histogram
+                n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+                int n_max_splits = n_max_nodes * n_bins;
+                aggregator.booster.fbuilder->merge_histograms_server_propose(hist, missing_gh);     // 改这个函数
+                n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+
+                // server compute gain 服务器计算所有分裂点的增益
+                SyncArray <float_type> gain(n_max_splits);
+                auto hist_fid_data = parties_hist_fid[0].host_data();
+                server.booster.fbuilder->compute_gain_in_a_level(gain, n_nodes_in_level, n_bins, hist_fid_data, missing_gh, hist);
+                // LOG(INFO) << "GAIN in level " << d << ": " << gain; 
+
+                // server find the best gain and its index 服务器找到最大增益及其索引
+                SyncArray <int_float> best_idx_gain(n_nodes_in_level);
+                server.booster.fbuilder->get_best_gain_in_a_level(gain, best_idx_gain, n_nodes_in_level, n_bins);
+                LOG(DEBUG) << "BEST_IDX_GAIN:" << best_idx_gain;
+                LOG(INFO) << "BEST_IDX_GAIN:" << best_idx_gain;
+
+                // 服务器计算分裂点
+                server.booster.fbuilder->get_split_points(best_idx_gain, n_nodes_in_level, hist_fid_data, missing_gh, hist);
+                LOG(DEBUG) << "SP" << server.booster.fbuilder->sp;
+                // LOG(INFO) << "SP" << server.booster.fbuilder->sp;
+                server.booster.fbuilder->update_tree();
+
+                trees_this_round[k] = server.booster.fbuilder->get_tree();
+                #pragma omp parallel for
+                for (int j = 0; j < n_parties; j++) {
+                    parties[j].booster.fbuilder->set_tree(trees_this_round[k]);
+                    parties[j].booster.fbuilder->update_ins2node_id();
+                }
+
+                bool split_further = true;
+                for (int pid = 0; pid < n_parties; pid++) {
+                    if (!parties[pid].booster.fbuilder->has_split) {
+                        split_further = false;
+                        break;
+                    }
+                }
+            }   // end 每层
+
+            t_end = timer.now();
+            used_time = t_end - t_start;
+            LOG(DEBUG) << "Building tree using time: " << used_time.count() << " s";
+            t_start = t_end;
+
+            // After training each tree, update vector of tree
+            server.booster.fbuilder->trees.prune_self(model_param.gamma);
+            Tree &tree = trees_this_round[k];
+            #pragma omp parallel for
+            for (int p = 0; p < n_parties; p++) {
+                parties[p].booster.fbuilder->trees.prune_self(model_param.gamma);
+                parties[p].booster.fbuilder->predict_in_training(k);
+            }
+            tree.nodes.resize(parties[0].booster.fbuilder->trees.nodes.size());
+            tree.nodes.copy_from(parties[0].booster.fbuilder->trees.nodes);
+
+            t_end = timer.now();
+            used_time = t_end - t_start;
+            LOG(DEBUG) << "Pruning tree using time: " << used_time.count() << " s";
+            t_start = t_end;
+        }   // end 一轮每棵树
+
+        // 更新GBDT模型
+        #pragma omp parallel for
+        for (int p = 0; p < n_parties; p++) {
+            parties[p].gbdt.trees.push_back(trees_this_round);
+        }
+        server.global_trees.trees.push_back(trees_this_round);
+        // LOG(INFO) <<  "Y_PREDICT" << parties[0].booster.fbuilder->get_y_predict();
+        float score = 0.0;
+        for (int p = 0; p < n_parties; p++){
+           score += parties[p].booster.metric->get_score(parties[p].booster.fbuilder->get_y_predict());
+        }
+        score /= n_parties;
+        // if (params.gbdt_param.n_trees == (i + 1)){
+        LOG(INFO) << "averaged " << parties[0].booster.metric->get_name() << " = " << score;
+        // }
+        LOG(INFO) << "================ Training round " << i << " end ================";
+    }
+    auto t_stop = timer.now();
+    std::chrono::duration<float> training_time = t_stop - start;
+    LOG(INFO) << "training time = " << training_time.count() << "s";
+
+    LOG(INFO) << "end of training";
+}
+
+/* CC Shapley
+*/
+void FLtrainer::horizontal_fl_trainer_cc(vector<Party> &parties, Server &server, FLParam &params) {
+    // LOG(INFO) << "Start horizontal training";
+    std::chrono::high_resolution_clock timer;
+    auto t_start = timer.now();
+    auto start = t_start;
+    auto model_param = params.gbdt_param;
+
+    // 构建直方图
+    // LOG(INFO) << "Initialize histogram";
+    // LOG(INFO) << "params.merge_histogram = " << params.merge_histogram;
+    Party &aggregator = (params.merge_histogram == "client")? parties[0] : server;  // aggregator = server
+    int n_parties = parties.size();
+    std::vector<double> sv(n_parties, 0);
+    int n_samples = 304;
+    // 初始化 utility 和 count 矩阵
+    std::vector<std::vector<double>> utility(n_parties + 1, std::vector<double>(n_parties, 0));
+    std::vector<std::vector<int>> count(n_parties + 1, std::vector<int>(n_parties, 0));
+    aggregator.booster.fbuilder->parties_hist_init(n_parties);
+    
+    // Generate HistCut by server or each party 生成直方图分割
+    // LOG(INFO) << "Generate HistCut by server or each party";
+    int n_bins = model_param.max_num_bin;
+    if (params.propose_split == "server") {
+        // 服务器分割 从所有party中找到每个特征的最大最小值
+        // loop through all party to find max and min for each feature
+        float inf = std::numeric_limits<float>::infinity();
+        vector<vector<float_type>> feature_range(parties[0].get_num_feature());
+        for (int n = 0; n < parties[0].get_num_feature(); n++) {
+            vector<float_type> min_max = {inf, -inf};
+            for (int p = 0; p < n_parties; p++) {
+                vector<float_type> temp = parties[p].get_feature_range_by_feature_index(n);
+                if (temp[0] <= min_max[0])
+                    min_max[0] = temp[0];
+                if (temp[1] >= min_max[1])
+                    min_max[1] = temp[1];
+            }
+            feature_range[n] = min_max;
+        }
+        // once we have feature_range, we can generate cut points
+        server.booster.fbuilder->cut.get_cut_points_by_feature_range(feature_range, n_bins);
+
+        for (int p = 0; p < n_parties; p++) {
+            parties[p].booster.fbuilder->set_cut(server.booster.fbuilder->cut);
+            parties[p].booster.fbuilder->get_bin_ids();
+        }
+
+    }
+    auto t_end = timer.now();
+    std::chrono::duration<float> used_time = t_end - t_start;
+    LOG(DEBUG) << "Initialization using time: " << used_time.count() << " s";
+    // LOG(INFO) << "Initialization using time: " << used_time.count() << " s";
+    t_start = t_end;
+
+    // 训练
+    for (int i = 0; i < params.gbdt_param.n_trees; i++) {   // 每轮
+        LOG(INFO) << "================ Training round " << i << " start ================";
+        int n_tree_this_round;
+        n_tree_this_round = params.gbdt_param.tree_per_round;
+        vector<Tree> trees_this_round;
+        trees_this_round.resize(n_tree_this_round);
+
+        GHPair sum_gh;
+        for (int pid = 0; pid < n_parties; pid++) {
+            parties[pid].booster.update_gradients();
+
+            GHPair party_gh = thrust::reduce(thrust::host, parties[pid].booster.gradients.host_data(), parties[pid].booster.gradients.host_end());
+            sum_gh = sum_gh + party_gh;
+        }
+
+        // for each tree per round
+        for (int k = 0; k < n_tree_this_round; k++) {   // 该轮的每棵树
+            #pragma omp parallel for
+            for (int pid = 0; pid < n_parties; pid++) {
+                parties[pid].booster.fbuilder->build_init(parties[pid].booster.gradients, k);
+            }
+            server.booster.fbuilder->build_init(sum_gh, k);
+
+            t_end = timer.now();
+            used_time = t_end - t_start;
+            LOG(DEBUG) << "Initializing builder using time: " << used_time.count() << " s";
+            t_start = t_end;
+
+            // for each level
+            for (int d = 0; d < params.gbdt_param.depth; d++) {     // 每层
+                int n_nodes_in_level = 1 << d;
+                int n_max_nodes = 2 << model_param.depth;
+                // LOG(INFO) << "level " << n_nodes_in_level;
+                MSyncArray<int> parties_hist_fid(n_parties);
+
+                // Each Party Compute Histogram
+                // each party compute hist, send hist to server or party
+                // 每个party计算直方图，并发送给服务器
+                #pragma omp parallel for
+                for (int j = 0; j < n_parties; j++) {   // 每个party计算直方图
+                    int n_column = parties[j].dataset.n_features();
+                    int n_partition = n_column * n_nodes_in_level;
+                    int n_bins = parties[j].booster.fbuilder->cut.cut_points_val.size();
+                    auto cut_fid_data = parties[j].booster.fbuilder->cut.cut_fid.host_data();
+                    int n_max_splits = n_max_nodes * n_bins;
+                    int n_splits = n_nodes_in_level * n_bins;
+                    SyncArray<int> hist_fid(n_splits);
+                    auto hist_fid_data = hist_fid.host_data();
+
+                    for (int i = 0; i < hist_fid.size(); i++)
+                        hist_fid_data[i] = cut_fid_data[i % n_bins];
+
+                    parties_hist_fid[j].resize(n_nodes_in_level * n_bins);
+                    parties_hist_fid[j].copy_from(hist_fid);
+
+                    SyncArray <GHPair> missing_gh(n_partition);
+                    SyncArray <GHPair> hist(n_splits);
+                    parties[j].booster.fbuilder->compute_histogram_in_a_level(d, n_max_splits, n_bins,
+                                                                              n_nodes_in_level,
+                                                                              hist_fid_data, missing_gh, hist);
+                    // LOG(INFO) << "hist: " << hist;
+                    // LOG(INFO) << "missing_gh" << missing_gh;
+
+                    t_end = timer.now();
+                    used_time = t_end - t_start;
+                    LOG(DEBUG) << "Computing histogram using time: " << used_time.count() << " s";
+                    // LOG(INFO) << "Computing histogram using time: " << used_time.count() << " s";
+                    t_start = t_end;
+
+                    // 服务器聚合直方图
+                    aggregator.booster.fbuilder->append_hist(hist, missing_gh, n_partition, n_splits, j);
+
+                    t_end = timer.now();
+                    used_time = t_end - t_start;
+                    LOG(DEBUG) << "Appending histogram using time: " << used_time.count() << " s";
+                    // LOG(INFO) << "Appending histogram using time: " << used_time.count() << " s";
+                    t_start = t_end;
+                }
+                // Now we have the array of hist and missing_gh
+                // LOG(INFO) << hist_list.size() << "\n" << hist_list;
+                // LOG(INFO) << missing_gh_list.size() << "\n" << missing_gh_list;
+
+                // CC数据价值评估
+                std::vector<int> idxs(n_parties);
+                std::iota(idxs.begin(), idxs.end(), 0);
+                std::mt19937 rng(9);
+                std::uniform_int_distribution<int> dist(1, n_parties);
+
+                for (int i = 0; i < n_samples; i++) {   // 该层每个样本
+                    std::shuffle(idxs.begin(), idxs.end(), rng);
+                    // LOG(INFO) << "sample " << i + 1 << "/" << n_samples << " " << idxs;
+                    int j = dist(rng);  // 分割点
+                    float u_1 = 0;
+                    float u_2 = 0;
+                    // LOG(INFO) << "j " << j;
+
+                    std::vector<int> set_1(idxs.begin(), idxs.begin() + j);
+                    std::vector<int> set_2(idxs.begin() + j, idxs.end());
+
+                    if ( !set_2.empty() ) {
+                        SyncArray <GHPair> missing_gh_1;
+                        SyncArray <GHPair> hist_1;
+                        SyncArray <GHPair> missing_gh_2;
+                        SyncArray <GHPair> hist_2;
+                        n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+                        int n_max_splits = n_max_nodes * n_bins;
+                        aggregator.booster.fbuilder->merge_histograms_server_propose_selected(hist_1, missing_gh_1, set_1);
+                        aggregator.booster.fbuilder->merge_histograms_server_propose_selected(hist_2, missing_gh_2, set_2);
+                        n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+
+                        SyncArray <float_type> gain_1(n_max_splits);
+                        SyncArray <float_type> gain_2(n_max_splits);
+                        auto hist_fid_data_1 = parties_hist_fid[set_1[0]].host_data();
+                        auto hist_fid_data_2 = parties_hist_fid[set_2[0]].host_data();
+                        server.booster.fbuilder->compute_gain_in_a_level(gain_1, n_nodes_in_level, n_bins, hist_fid_data_1, missing_gh_1, hist_1);
+                        server.booster.fbuilder->compute_gain_in_a_level(gain_2, n_nodes_in_level, n_bins, hist_fid_data_2, missing_gh_2, hist_2);
+
+                        SyncArray <int_float> best_idx_gain_1(n_nodes_in_level);
+                        SyncArray <int_float> best_idx_gain_2(n_nodes_in_level);
+                        server.booster.fbuilder->get_best_gain_in_a_level(gain_1, best_idx_gain_1, n_nodes_in_level, n_bins);
+                        server.booster.fbuilder->get_best_gain_in_a_level(gain_2, best_idx_gain_2, n_nodes_in_level, n_bins);
+                        // LOG(INFO) << "BEST_IDX_GAIN_1:" << best_idx_gain_1;
+                        // LOG(INFO) << "BEST_IDX_GAIN_2:" << best_idx_gain_2;
+                        
+                        // 效用累加，效用等于每个分裂的gain
+                        const int_float *best_idx_gain_1_data = best_idx_gain_1.host_data();
+                        const int_float *best_idx_gain_2_data = best_idx_gain_2.host_data();
+                        for (int k = 0; k < n_nodes_in_level; k++) {
+                            int_float bst1 = best_idx_gain_1_data[k];
+                            int_float bst2 = best_idx_gain_2_data[k];
+                            u_1 += get < 1 > (bst1);
+                            u_2 += get < 1 > (bst2);
+                            // LOG(INFO) << "u_1 " << u_1;
+                            // LOG(INFO) << "u_2 " << u_2;
+                        }
+
+                        // 更新效用和计数
+                        std::vector<int> temp(n_parties, 0);
+                        for (int k = 0; k < j; k++) {
+                            temp[idxs[k]] = 1;
+                        }
+                        for (int k = 0; k < n_parties; k++) {
+                            utility[j][k] += temp[k] * (u_1 - u_2);
+                            count[j][k] += temp[k];
+                        }
+                        std::fill(temp.begin(), temp.end(), 0);
+                        for (int k = j; k < n_parties; k++) {
+                            temp[idxs[k]] = 1;
+                        }
+                        for (int k = 0; k < n_parties; k++) {
+                            utility[n_parties - j][k] += temp[k] * (u_2 - u_1);
+                            count[n_parties - j][k] += temp[k];
+                        }
+                        
+                    } else {
+                        SyncArray <GHPair> missing_gh_1;
+                        SyncArray <GHPair> hist_1;
+
+                        n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+                        int n_max_splits = n_max_nodes * n_bins;
+                        aggregator.booster.fbuilder->merge_histograms_server_propose_selected(hist_1, missing_gh_1, set_1);
+                        n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+
+                        SyncArray <float_type> gain_1(n_max_splits);
+                        auto hist_fid_data_1 = parties_hist_fid[set_1[0]].host_data();
+                        server.booster.fbuilder->compute_gain_in_a_level(gain_1, n_nodes_in_level, n_bins, hist_fid_data_1, missing_gh_1, hist_1);
+
+                        SyncArray <int_float> best_idx_gain_1(n_nodes_in_level);                        
+                        server.booster.fbuilder->get_best_gain_in_a_level(gain_1, best_idx_gain_1, n_nodes_in_level, n_bins);
+                        // LOG(INFO) << "BEST_IDX_GAIN_1:" << best_idx_gain_1;
+
+                        // 效用累加，效用等于每个分裂的gain
+                        const int_float *best_idx_gain_1_data = best_idx_gain_1.host_data();
+                        for (int k = 0; k < n_nodes_in_level; k++) {
+                            int_float bst1 = best_idx_gain_1_data[k];
+                            u_1 += get < 1 > (bst1);
+                            // LOG(INFO) << "u_1 " << u_1;
+                            // LOG(INFO) << "u_2 " << u_2;
+                        }
+
+                        // 更新效用和计数
+                        for (int k = 0; k < n_parties; k++) {
+                            utility[j][k] += (u_1 - u_2);
+                            count[j][k] += 1;
+                        }
+                    }
+                    
+                }
+
+                SyncArray <GHPair> missing_gh;
+                SyncArray <GHPair> hist;
+                // set these parameters to fit merged histogram
+                n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+                int n_max_splits = n_max_nodes * n_bins;
+                aggregator.booster.fbuilder->merge_histograms_server_propose(hist, missing_gh);
+                n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+
+                // server compute gain 服务器计算所有分裂点的增益
+                SyncArray <float_type> gain(n_max_splits);
+                auto hist_fid_data = parties_hist_fid[0].host_data();
+                server.booster.fbuilder->compute_gain_in_a_level(gain, n_nodes_in_level, n_bins, hist_fid_data, missing_gh, hist);
+                // LOG(INFO) << "GAIN in level " << d << ": " << gain; 
+
+                // server find the best gain and its index 服务器找到最大增益及其索引
+                SyncArray <int_float> best_idx_gain(n_nodes_in_level);
+                server.booster.fbuilder->get_best_gain_in_a_level(gain, best_idx_gain, n_nodes_in_level, n_bins);
+                LOG(DEBUG) << "BEST_IDX_GAIN:" << best_idx_gain;
+                LOG(INFO) << "BEST_IDX_GAIN:" << best_idx_gain;
+
+                // 服务器计算分裂点
+                server.booster.fbuilder->get_split_points(best_idx_gain, n_nodes_in_level, hist_fid_data, missing_gh, hist);
+                LOG(DEBUG) << "SP" << server.booster.fbuilder->sp;
+                // LOG(INFO) << "SP" << server.booster.fbuilder->sp;
+                server.booster.fbuilder->update_tree();
+
+                trees_this_round[k] = server.booster.fbuilder->get_tree();
+                #pragma omp parallel for
+                for (int j = 0; j < n_parties; j++) {
+                    parties[j].booster.fbuilder->set_tree(trees_this_round[k]);
+                    parties[j].booster.fbuilder->update_ins2node_id();
+                }
+
+                bool split_further = true;
+                for (int pid = 0; pid < n_parties; pid++) {
+                    if (!parties[pid].booster.fbuilder->has_split) {
+                        split_further = false;
+                        break;
+                    }
+                }
+            }   // end 每层
+
+            t_end = timer.now();
+            used_time = t_end - t_start;
+            LOG(DEBUG) << "Building tree using time: " << used_time.count() << " s";
+            t_start = t_end;
+
+            // After training each tree, update vector of tree
+            server.booster.fbuilder->trees.prune_self(model_param.gamma);
+            Tree &tree = trees_this_round[k];
+            #pragma omp parallel for
+            for (int p = 0; p < n_parties; p++) {
+                parties[p].booster.fbuilder->trees.prune_self(model_param.gamma);
+                parties[p].booster.fbuilder->predict_in_training(k);
+            }
+            tree.nodes.resize(parties[0].booster.fbuilder->trees.nodes.size());
+            tree.nodes.copy_from(parties[0].booster.fbuilder->trees.nodes);
+
+            t_end = timer.now();
+            used_time = t_end - t_start;
+            LOG(DEBUG) << "Pruning tree using time: " << used_time.count() << " s";
+            t_start = t_end;
+        }   // end 一轮每棵树
+
+        // 更新GBDT模型
+        #pragma omp parallel for
+        for (int p = 0; p < n_parties; p++) {
+            parties[p].gbdt.trees.push_back(trees_this_round);
+        }
+        server.global_trees.trees.push_back(trees_this_round);
+        // LOG(INFO) <<  "Y_PREDICT" << parties[0].booster.fbuilder->get_y_predict();
+        float score = 0.0;
+        for (int p = 0; p < n_parties; p++){
+           score += parties[p].booster.metric->get_score(parties[p].booster.fbuilder->get_y_predict());
+        }
+        score /= n_parties;
+        if (params.gbdt_param.n_trees == (i + 1)){
+            LOG(INFO) << "averaged " << parties[0].booster.metric->get_name() << " = " << score;
+        }
+        LOG(INFO) << "================ Training round " << i << " end ================";
+    }
+    auto t_stop = timer.now();
+    std::chrono::duration<float> training_time = t_stop - start;
+    LOG(INFO) << "training time = " << training_time.count() << "s";
+
+    // Shapley值平均
+    for (int i = 1; i <= n_parties; i++) {
+        for (int j = 0; j < n_parties; j++) {
+            if (count[i][j] == 0) {
+                sv[j] += 0;
+            }else {
+                sv[j] += (utility[i][j] / count[i][j]);
+            }
+        }
+    }
+    double sum_sv = 0;
+    for (double & val : sv) {
+        val /= n_parties;
+        sum_sv += val;
+    }
+    LOG(INFO) << sv;
+    LOG(INFO) << sum_sv;
+
+    std::string outFileName = "CC_split";
+    outFileName.append("_n_")
+                .append(std::to_string(n_parties))
+                .append("_m_")
+                .append(std::to_string(n_samples));
+    std::ofstream outFile(outFileName);
+
+    if (outFile.is_open()) {
+        outFile << "sv\t";
+        for (const auto& val : sv) {
+            outFile << val << ", ";
+        }
+        outFile << "\n";
+        outFile << "sum_sv\t" << sum_sv << "\n";
+        outFile << "time\t" << training_time.count();
+
+        outFile.close();
+    } else {
+        LOG(ERROR) << "unable to write file";
+    }
+
+    LOG(INFO) << "end of training";
+}
+
+void FLtrainer::horizontal_fl_trainer_mc(vector<Party> &parties, Server &server, FLParam &params) {
+    // LOG(INFO) << "Start horizontal training";
+    std::chrono::high_resolution_clock timer;
+    auto t_start = timer.now();
+    auto start = t_start;
+    auto model_param = params.gbdt_param;
+
+    // 构建直方图
+    // LOG(INFO) << "Initialize histogram";
+    // LOG(INFO) << "params.merge_histogram = " << params.merge_histogram;
+    Party &aggregator = (params.merge_histogram == "client")? parties[0] : server;  // aggregator = server
+    int n_parties = parties.size();
+    std::vector<double> sv(n_parties, 0);
+    int n_samples = 200;
+    aggregator.booster.fbuilder->parties_hist_init(n_parties);
+    
+    // Generate HistCut by server or each party 生成直方图分割
+    // LOG(INFO) << "Generate HistCut by server or each party";
+    int n_bins = model_param.max_num_bin;
+    if (params.propose_split == "server") {
+        // 服务器分割 从所有party中找到每个特征的最大最小值
+        // loop through all party to find max and min for each feature
+        float inf = std::numeric_limits<float>::infinity();
+        vector<vector<float_type>> feature_range(parties[0].get_num_feature());
+        for (int n = 0; n < parties[0].get_num_feature(); n++) {
+            vector<float_type> min_max = {inf, -inf};
+            for (int p = 0; p < n_parties; p++) {
+                vector<float_type> temp = parties[p].get_feature_range_by_feature_index(n);
+                if (temp[0] <= min_max[0])
+                    min_max[0] = temp[0];
+                if (temp[1] >= min_max[1])
+                    min_max[1] = temp[1];
+            }
+            feature_range[n] = min_max;
+        }
+        // once we have feature_range, we can generate cut points
+        server.booster.fbuilder->cut.get_cut_points_by_feature_range(feature_range, n_bins);
+
+        for (int p = 0; p < n_parties; p++) {
+            parties[p].booster.fbuilder->set_cut(server.booster.fbuilder->cut);
+            parties[p].booster.fbuilder->get_bin_ids();
+        }
+
+    }
+    auto t_end = timer.now();
+    std::chrono::duration<float> used_time = t_end - t_start;
+    LOG(DEBUG) << "Initialization using time: " << used_time.count() << " s";
+    // LOG(INFO) << "Initialization using time: " << used_time.count() << " s";
+    t_start = t_end;
+
+    // 训练
+    for (int i = 0; i < params.gbdt_param.n_trees; i++) {   // 每轮
+        LOG(INFO) << "================ Training round " << i << " start ================";
+        int n_tree_this_round;
+        n_tree_this_round = params.gbdt_param.tree_per_round;
+        vector<Tree> trees_this_round;
+        trees_this_round.resize(n_tree_this_round);
+
+        GHPair sum_gh;
+        for (int pid = 0; pid < n_parties; pid++) {
+            parties[pid].booster.update_gradients();
+
+            GHPair party_gh = thrust::reduce(thrust::host, parties[pid].booster.gradients.host_data(), parties[pid].booster.gradients.host_end());
+            sum_gh = sum_gh + party_gh;
+        }
+
+        // for each tree per round
+        for (int k = 0; k < n_tree_this_round; k++) {   // 该轮的每棵树
+            #pragma omp parallel for
+            for (int pid = 0; pid < n_parties; pid++) {
+                parties[pid].booster.fbuilder->build_init(parties[pid].booster.gradients, k);
+            }
+            server.booster.fbuilder->build_init(sum_gh, k);
+
+            t_end = timer.now();
+            used_time = t_end - t_start;
+            LOG(DEBUG) << "Initializing builder using time: " << used_time.count() << " s";
+            t_start = t_end;
+
+            // for each level
+            for (int d = 0; d < params.gbdt_param.depth; d++) {     // 每层
+                int n_nodes_in_level = 1 << d;
+                int n_max_nodes = 2 << model_param.depth;
+                LOG(INFO) << "level " << n_nodes_in_level;
+                float max_u = 0;                
+                MSyncArray<int> parties_hist_fid(n_parties);
+
+                // Each Party Compute Histogram
+                // each party compute hist, send hist to server or party
+                // 每个party计算直方图，并发送给服务器
+                #pragma omp parallel for
+                for (int j = 0; j < n_parties; j++) {   // 每个party计算直方图
+                    int n_column = parties[j].dataset.n_features();
+                    int n_partition = n_column * n_nodes_in_level;
+                    int n_bins = parties[j].booster.fbuilder->cut.cut_points_val.size();
+                    auto cut_fid_data = parties[j].booster.fbuilder->cut.cut_fid.host_data();
+                    int n_max_splits = n_max_nodes * n_bins;
+                    int n_splits = n_nodes_in_level * n_bins;
+                    SyncArray<int> hist_fid(n_splits);
+                    auto hist_fid_data = hist_fid.host_data();
+
+                    for (int i = 0; i < hist_fid.size(); i++)
+                        hist_fid_data[i] = cut_fid_data[i % n_bins];
+
+                    parties_hist_fid[j].resize(n_nodes_in_level * n_bins);
+                    parties_hist_fid[j].copy_from(hist_fid);
+
+                    SyncArray <GHPair> missing_gh(n_partition);
+                    SyncArray <GHPair> hist(n_splits);
+                    parties[j].booster.fbuilder->compute_histogram_in_a_level(d, n_max_splits, n_bins,
+                                                                              n_nodes_in_level,
+                                                                              hist_fid_data, missing_gh, hist);
+                    // LOG(INFO) << "hist: " << hist;
+                    // LOG(INFO) << "missing_gh" << missing_gh;
+
+                    t_end = timer.now();
+                    used_time = t_end - t_start;
+                    LOG(DEBUG) << "Computing histogram using time: " << used_time.count() << " s";
+                    // LOG(INFO) << "Computing histogram using time: " << used_time.count() << " s";
+                    t_start = t_end;
+
+                    // 服务器聚合直方图
+                    aggregator.booster.fbuilder->append_hist(hist, missing_gh, n_partition, n_splits, j);
+
+                    t_end = timer.now();
+                    used_time = t_end - t_start;
+                    LOG(DEBUG) << "Appending histogram using time: " << used_time.count() << " s";
+                    // LOG(INFO) << "Appending histogram using time: " << used_time.count() << " s";
+                    t_start = t_end;
+                }
+                // Now we have the array of hist and missing_gh
+                // LOG(INFO) << hist_list.size() << "\n" << hist_list;
+                // LOG(INFO) << missing_gh_list.size() << "\n" << missing_gh_list;
+
+                // MC数据价值评估
+                std::vector<int> idxs(n_parties);
+                std::iota(idxs.begin(), idxs.end(), 0);
+                std::mt19937 rng(9);
+                std::vector<float> standalone_gain(n_parties + 1, 0);
+
+                for (int i = 0; i < n_samples; i++) {   // 该层每个样本
+                    std::shuffle(idxs.begin(), idxs.end(), rng);
+                    // LOG(INFO) << "sample " << i + 1 << "/" << n_samples << " " << idxs;
+                    float old_u = 0;
+                    
+                    for (int j = 1; j <= n_parties; j++) {  // 样本增量计算
+                        std::vector<int> current_set(idxs.begin(), idxs.begin() + j);
+                        // LOG(INFO) << "current_set " << current_set;
+                        float temp_u = 0;
+
+                        // 如果有旧数据，取用旧数据，没有再拼接直方图计算gain
+                        if (j == 1 && standalone_gain[current_set[0]] != 0) {
+                            temp_u = standalone_gain[current_set[0]];
+                        }else if (j == n_parties && standalone_gain[n_parties] != 0) {
+                            temp_u = standalone_gain[n_parties];
+                        }else {
+                            SyncArray<GHPair> missing_gh;
+                            SyncArray<GHPair> hist;
+                            n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+                            int n_max_splits = n_max_nodes * n_bins;
+                            aggregator.booster.fbuilder->merge_histograms_server_propose_selected(hist, missing_gh, current_set);
+                            n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+
+                            SyncArray<float_type> gain(n_max_splits);
+                            auto hist_fid_data = parties_hist_fid[current_set[0]].host_data();
+                            server.booster.fbuilder->compute_gain_in_a_level(gain, n_nodes_in_level, n_bins, hist_fid_data, missing_gh, hist);
+
+                            SyncArray<int_float> best_idx_gain(n_nodes_in_level);
+                            server.booster.fbuilder->get_best_gain_in_a_level(gain, best_idx_gain, n_nodes_in_level, n_bins);
+                            const int_float *best_idx_gain_data = best_idx_gain.host_data();
+                            for (int k = 0; k < n_nodes_in_level; k++) {
+                                int_float bst = best_idx_gain_data[k];
+                                temp_u += get < 1 > (bst);
+                            }
+                        }
+                        // LOG(INFO) << "gain " << current_set << " " << temp_u;
+
+                        // 记录效用
+                        if (j == 1 && standalone_gain[current_set[0]] == 0) {
+                            standalone_gain[current_set[0]] = temp_u;
+                        }
+                        if (j == n_parties) {
+                            if (i == 0) {
+                                standalone_gain[n_parties] = temp_u;
+                            //     max_u = temp_u;
+                            // }else {
+                            //     max_u = (temp_u + max_u) / 2;
+                            }
+                            
+                        }
+                        // if (i > 0 && std::abs(max_u - temp_u) <= 1 && j != n_parties) {
+                        //     LOG(INFO) << "truncated!!!";
+                        //     break;
+                        // }
+                        float contribution = temp_u - old_u;
+                        sv[idxs[j - 1]] += contribution;
+                        old_u = temp_u;
+                    }
+                }
+
+                SyncArray <GHPair> missing_gh;
+                SyncArray <GHPair> hist;
+                // set these parameters to fit merged histogram
+                n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+                int n_max_splits = n_max_nodes * n_bins;
+                aggregator.booster.fbuilder->merge_histograms_server_propose(hist, missing_gh);
+                n_bins = aggregator.booster.fbuilder->cut.cut_points_val.size();
+
+                // server compute gain 服务器计算所有分裂点的增益
+                SyncArray <float_type> gain(n_max_splits);
+                auto hist_fid_data = parties_hist_fid[0].host_data();
+                server.booster.fbuilder->compute_gain_in_a_level(gain, n_nodes_in_level, n_bins, hist_fid_data, missing_gh, hist);
+                // LOG(INFO) << "GAIN in level " << d << ": " << gain; 
+
+                // server find the best gain and its index 服务器找到最大增益及其索引
+                SyncArray <int_float> best_idx_gain(n_nodes_in_level);
+                server.booster.fbuilder->get_best_gain_in_a_level(gain, best_idx_gain, n_nodes_in_level, n_bins);
+                LOG(DEBUG) << "BEST_IDX_GAIN:" << best_idx_gain;
+                // LOG(INFO) << "BEST_IDX_GAIN:" << best_idx_gain;
+
+                // 服务器计算分裂点
+                server.booster.fbuilder->get_split_points(best_idx_gain, n_nodes_in_level, hist_fid_data, missing_gh, hist);
+                LOG(DEBUG) << "SP" << server.booster.fbuilder->sp;
+                // LOG(INFO) << "SP" << server.booster.fbuilder->sp;
+                server.booster.fbuilder->update_tree();
+
+                trees_this_round[k] = server.booster.fbuilder->get_tree();
+                #pragma omp parallel for
+                for (int j = 0; j < n_parties; j++) {
+                    parties[j].booster.fbuilder->set_tree(trees_this_round[k]);
+                    parties[j].booster.fbuilder->update_ins2node_id();
+                }
+
+                bool split_further = true;
+                for (int pid = 0; pid < n_parties; pid++) {
+                    if (!parties[pid].booster.fbuilder->has_split) {
+                        split_further = false;
+                        break;
+                    }
+                }
+            }   // end 每层
+
+            t_end = timer.now();
+            used_time = t_end - t_start;
+            LOG(DEBUG) << "Building tree using time: " << used_time.count() << " s";
+            t_start = t_end;
+
+            // After training each tree, update vector of tree
+            server.booster.fbuilder->trees.prune_self(model_param.gamma);
+            Tree &tree = trees_this_round[k];
+            #pragma omp parallel for
+            for (int p = 0; p < n_parties; p++) {
+                parties[p].booster.fbuilder->trees.prune_self(model_param.gamma);
+                parties[p].booster.fbuilder->predict_in_training(k);
+            }
+            tree.nodes.resize(parties[0].booster.fbuilder->trees.nodes.size());
+            tree.nodes.copy_from(parties[0].booster.fbuilder->trees.nodes);
+
+            t_end = timer.now();
+            used_time = t_end - t_start;
+            LOG(DEBUG) << "Pruning tree using time: " << used_time.count() << " s";
+            t_start = t_end;
+        }   // end 一轮每棵树
+
+        // 更新GBDT模型
+        #pragma omp parallel for
+        for (int p = 0; p < n_parties; p++) {
+            parties[p].gbdt.trees.push_back(trees_this_round);
+        }
+        server.global_trees.trees.push_back(trees_this_round);
+        // LOG(INFO) <<  "Y_PREDICT" << parties[0].booster.fbuilder->get_y_predict();
+        float score = 0.0;
+        for (int p = 0; p < n_parties; p++){
+           score += parties[p].booster.metric->get_score(parties[p].booster.fbuilder->get_y_predict());
+        }
+        score /= n_parties;
+        if (params.gbdt_param.n_trees == (i + 1)){
+            LOG(INFO) << "averaged " << parties[0].booster.metric->get_name() << " = " << score;
+        }
+        LOG(INFO) << "================ Training round " << i << " end ================";
+    }
+    auto t_stop = timer.now();
+    std::chrono::duration<float> training_time = t_stop - start;
+    LOG(INFO) << "training time = " << training_time.count() << "s";
+
+    // Shapley值平均
+    double sum_sv = 0;
+    for (double & val : sv) {
+        val /= (n_samples*(params.gbdt_param.n_trees + 1)*(params.gbdt_param.depth - 1));
+        sum_sv += val;
+    }
+    LOG(INFO) << sv;
+    LOG(INFO) << sum_sv;
+
+    std::string outFileName = "MC_split";
+    outFileName.append("_n_")
+                .append(std::to_string(n_parties))
+                .append("_m_")
+                .append(std::to_string(n_samples));
+    std::ofstream outFile(outFileName);
+
+    if (outFile.is_open()) {
+        outFile << "sv\t";
+        for (const auto& val : sv) {
+            outFile << val << ", ";
+        }
+        outFile << "\n";
+        outFile << "sum_sv\t" << sum_sv << "\n";
+        outFile << "time\t" << training_time.count();
+
+        outFile.close();
+    } else {
+        LOG(ERROR) << "unable to write file";
     }
 
     LOG(INFO) << "end of training";

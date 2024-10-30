@@ -104,6 +104,7 @@ extern "C" {
         num_class[0] = gbdt_param.num_class;
         fl_param.gbdt_param = gbdt_param;
         LOG(INFO) << "Partition the Data";
+        // 分割数据集
         // Partition the dataset
         n_parties = fl_param.n_parties;
         vector<DataSet> subsets(n_parties);
@@ -144,6 +145,8 @@ extern "C" {
         else if(param.objective.find("reg:") != std::string::npos){
             param.num_class = 1;
         }
+
+        // 创建 Party 对象
         vector<Party> parties(n_parties);
         vector<int> n_instances_per_party(n_parties);
         Server server;

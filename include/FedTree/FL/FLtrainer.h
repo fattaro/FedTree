@@ -13,6 +13,12 @@ class FLtrainer {
 public:
     void horizontal_fl_trainer(vector<Party> &parties, Server &server, FLParam &params);
 
+    void horizontal_fl_trainer_streamline(vector<Party> &parties, Server &server, FLParam &params);
+
+    void horizontal_fl_trainer_cc(vector<Party> &parties, Server &server, FLParam &params);
+
+    void horizontal_fl_trainer_mc(vector<Party> &parties, Server &server, FLParam &params);
+
     void vertical_fl_trainer(vector<Party> &parties, Server &server, FLParam &params);
 
     void hybrid_fl_trainer(vector<Party> &parties, Server &server, FLParam &params);
