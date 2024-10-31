@@ -320,215 +320,69 @@ int main(int argc, char** argv){
 
         /* MC_retrain
         */
-        // int local_m = 720;
-        // std::vector<double> sv(n_parties, 0.0);
-        // std::vector<int> idxs(n_parties);
-        // std::iota(idxs.begin(), idxs.end(), 0);
-        // std::mt19937 rng(9);
-        // std::vector<double> standalone_AUC(n_parties + 1, 0.0);
-        // double max_u = 0.0;
-
-        // auto t_start = timer.now();
-        // for (int i = 0; i < local_m; ++i) {  // 每个样本
-        //     std::shuffle(idxs.begin(), idxs.end(), rng);
-        //     LOG(INFO) << "\nsample " << i + 1 << "/" << local_m << " " << idxs;
-        //     double old_u = 0;
-        //     for(int j = 1; j <= n_parties; j++) {  // 样本增量计算
-        //         std::vector<int> current_set(idxs.begin(), idxs.begin() + j);
-        //         LOG(INFO) << "====== current set " << current_set << " ======";
-        //         std::vector<Party> selected_party(current_set.size());
-        //         fl_param.n_parties = current_set.size();
-        //         server.horizontal_init(fl_param);
-        //         for (int k = 0; k < current_set.size(); k++) {
-        //             int _id = parties[current_set[k]].pid;
-        //             DataSet _dataset = parties[current_set[k]].dataset;
-        //             selected_party[k].init(_id, _dataset, fl_param);
-        //         }
-        //         double temp_u = 0.0;
-        //         // 如果有数据，取用旧数据
-        //         if (j == 1 && standalone_AUC[current_set[0]] != 0.0){
-        //             temp_u = standalone_AUC[current_set[0]];
-        //         }else if (j == n_parties && standalone_AUC[n_parties] != 0.0) {
-        //             temp_u = standalone_AUC[n_parties];
-        //         }else {
-        //             // LOG(INFO) << "start horizontal training";
-        //             trainer.horizontal_fl_trainer(selected_party, server, fl_param);
-        //             // LOG(INFO) << "end horizontal training";
-        //             temp_u = selected_party[0].gbdt.predict_score(fl_param.gbdt_param, test_dataset[0]);
-        //         }
-                
-        //         LOG(INFO) << "====== current_set AUC " << temp_u << " ======";
-        //         // 记录数据
-        //         if (j == 1 && standalone_AUC[current_set[0]] == 0.0) {
-        //             standalone_AUC[current_set[0]] = temp_u;
-        //         }
-        //         if (j == n_parties) {
-        //             if (i == 0) {
-        //                 standalone_AUC[n_parties] = temp_u;
-        //                 max_u = temp_u;
-        //             }else {
-        //                 max_u = (temp_u + max_u) / 2;
-        //             }
-        //         }
-        //         // if (i > 0 && std::abs(max_u - temp_u) <= 0.001 && j != n_parties) {
-        //         //     LOG(INFO) << "truncated!!!!!";
-        //         //     break;
-        //         // }
-        //         double contribution = temp_u - old_u;
-        //         sv[idxs[j - 1]] += contribution;
-        //         old_u = temp_u;
-        //     }
-        //     // 记录小样本量的 Shapley 值
-        //     if ((i+1) % 100 == 0) {
-        //     // if ((i+1) % 2 == 0) {
-        //         std::string outFileName_inner = "MC_retrain_inner";
-        //         outFileName_inner.append("_n_")
-        //                         .append(std::to_string(n_parties))
-        //                         .append("_m_")
-        //                         .append(std::to_string(i + 1));
-        //         std::ofstream outFile_inner(outFileName_inner);
-        //         if (outFile_inner.is_open()) {
-        //             outFile_inner << "sv\t";
-        //             double sum_temp = 0;
-        //             for (const auto& val : sv) {
-        //                 outFile_inner << val/(i+1) << ", ";
-        //                 sum_temp += val/(i+1);
-        //             }
-        //             outFile_inner << "\n";
-        //             outFile_inner << "sum_sv\t" << sum_temp << "\n";
-        //             outFile_inner.close();
-        //         } else {
-        //             LOG(ERROR) << "unable to write file";
-        //         }
-        //     }
-        // }
-        // double sum_sv = 0.0;
-        // for (double& val : sv) {
-        //     val /= local_m;
-        //     sum_sv += val;
-        // }
-        // LOG(INFO) << sv;
-        // LOG(INFO) << sum_sv;
-        // auto t_end = timer.now();
-        // std::chrono::duration<float> used_time = t_end - t_start;
-        // LOG(INFO) << "MC_SHAP using time:" << used_time.count() << " s";
-
-        // // 写文件
-        // std::string outFileName = "MC_retrain";
-        // outFileName.append("_n_")
-        //             .append(std::to_string(n_parties))
-        //             .append("_m_")
-        //             .append(std::to_string(local_m));
-        // std::ofstream outFile(outFileName);
-
-        // if (outFile.is_open()) {
-        //     outFile << "sv\t";
-        //     for (const auto& val : sv) {
-        //         outFile << val << ", ";
-        //     }
-        //     outFile << "\n";
-        //     outFile << "sum_sv\t" << sum_sv << "\n";
-        //     outFile << "time\t" << used_time.count() << "s\n";
-
-        //     outFile.close();
-        // } else {
-        //     LOG(ERROR) << "unable to write file";
-        // }
-
-        /* CC_retrain
-        */
-        int local_m = 500;
+        int local_m = 99;
         std::vector<double> sv(n_parties, 0.0);
         std::vector<int> idxs(n_parties);
         std::iota(idxs.begin(), idxs.end(), 0);
         std::mt19937 rng(9);
-        std::uniform_int_distribution<int> dist(1, n_parties);
-        // 初始化 utility 和 count 矩阵，大小为 (n+1)*n
-        std::vector<std::vector<double>> utility(fl_param.n_parties + 1, std::vector<double>(n_parties, 0));
-        std::vector<std::vector<int>> count(fl_param.n_parties + 1, std::vector<int>(n_parties, 0));
+        std::vector<double> standalone_AUC(n_parties + 1, 0.0);
+        double max_u = 0.0;
 
         auto t_start = timer.now();
-        for (int i = 0; i < local_m; i++) {     // 每个样本
+        for (int i = 0; i < local_m; ++i) {  // 每个样本
             std::shuffle(idxs.begin(), idxs.end(), rng);
             LOG(INFO) << "\nsample " << i + 1 << "/" << local_m << " " << idxs;
-            int j = dist(rng);  // 分割点
-            double u_1, u_2;
-            LOG(INFO) << j;
-
-            std::vector<int> set_1(idxs.begin(), idxs.begin() + j);
-            std::vector<int> set_2(idxs.begin() + j, idxs.end());
-
-            LOG(INFO) << "set_1" << set_1;
-            LOG(INFO) << "set_2" << set_2;
-            std::vector<Party> selected_party_1(set_1.size());
-            std::vector<Party> selected_party_2(set_2.size());
-            
-            // selected_party_1训练
-            fl_param.n_parties = set_1.size();
-            server.horizontal_init(fl_param);
-            for (int k = 0; k < set_1.size(); k++) {
-                int _id = parties[set_1[k]].pid;
-                DataSet _dataset = parties[set_1[k]].dataset;
-                selected_party_1[k].init(_id, _dataset, fl_param);
-            }
-            trainer.horizontal_fl_trainer(selected_party_1, server, fl_param);
-            u_1 = selected_party_1[0].gbdt.predict_score(fl_param.gbdt_param, test_dataset[0]);
-
-            // selected_party_2训练
-            if (j == n_parties) {
-                u_2 = 0;
-            } else {
-                fl_param.n_parties = set_2.size();
-            server.horizontal_init(fl_param);
-            for (int k = 0; k < set_2.size(); k++) {
-                int _id = parties[set_2[k]].pid;
-                DataSet _dataset = parties[set_2[k]].dataset;
-                selected_party_2[k].init(_id, _dataset, fl_param);
-            }
-            trainer.horizontal_fl_trainer(selected_party_2, server, fl_param);
-            u_2 = selected_party_2[0].gbdt.predict_score(fl_param.gbdt_param, test_dataset[0]);
-            }
-            
-            LOG(INFO) << "u_1 " << u_1;
-            LOG(INFO) << "u_2 " << u_2;
-
-            // 更新效用和计数
-            std::vector<int> temp(n_parties, 0);
-            for (int k = 0; k < j; k++) {
-                temp[idxs[k]] = 1;
-            }
-            for (int k = 0; k < n_parties; k++) {
-                utility[j][k] += temp[k] * (u_1 - u_2);
-                count[j][k] += temp[k];
-            }
-            std::fill(temp.begin(), temp.end(), 0);
-            for (int k = j; k < n_parties; k++) {
-                temp[idxs[k]] = 1;
-            }
-            for (int k = 0; k < n_parties; k++) {
-                utility[n_parties - j][k] += temp[k] * (u_2 - u_1);
-                count[n_parties - j][k] += temp[k];
-            }
-
-            // 记录小样本 Shapley 值
-            // if ((i + 1) % 100 == 0) {
-            if ((i + 1) % 2 == 0) {
-                std::vector<double> sv_inner(n_parties, 0);
-                double sum_sv_inner = 0;
-                for (int k = 1; k <= n_parties; k++) {
-                    for (int p = 0; p < n_parties; p++) {
-                        if (count[k][p] == 0) {
-                            sv_inner[p] += 0;
-                        } else {
-                            sv_inner[p] += (utility[k][p] / count[k][p]);
-                        }
+            double old_u = 0;
+            for(int j = 1; j <= n_parties; j++) {  // 样本增量计算
+                std::vector<int> current_set(idxs.begin(), idxs.begin() + j);
+                LOG(INFO) << "====== current set " << current_set << " ======";
+                std::vector<Party> selected_party(current_set.size());
+                fl_param.n_parties = current_set.size();
+                server.horizontal_init(fl_param);
+                for (int k = 0; k < current_set.size(); k++) {
+                    int _id = parties[current_set[k]].pid;
+                    DataSet _dataset = parties[current_set[k]].dataset;
+                    selected_party[k].init(_id, _dataset, fl_param);
+                }
+                double temp_u = 0.0;
+                // 如果有数据，取用旧数据
+                if (j == 1 && standalone_AUC[current_set[0]] != 0.0){
+                    temp_u = standalone_AUC[current_set[0]];
+                }else if (j == n_parties && standalone_AUC[n_parties] != 0.0) {
+                    temp_u = standalone_AUC[n_parties];
+                }else {
+                    // LOG(INFO) << "start horizontal training";
+                    trainer.horizontal_fl_trainer(selected_party, server, fl_param);
+                    // LOG(INFO) << "end horizontal training";
+                    temp_u = selected_party[0].gbdt.predict_score(fl_param.gbdt_param, test_dataset[0]);
+                }
+                
+                LOG(INFO) << "====== current_set AUC " << temp_u << " ======";
+                // 记录数据
+                if (j == 1 && standalone_AUC[current_set[0]] == 0.0) {
+                    standalone_AUC[current_set[0]] = temp_u;
+                }
+                if (j == n_parties) {
+                    if (i == 0) {
+                        standalone_AUC[n_parties] = temp_u;
+                        max_u = temp_u;
+                    }else {
+                        max_u = (temp_u + max_u) / 2;
                     }
                 }
-                for (double & val : sv_inner) {
-                    val /= n_parties;
-                    sum_sv_inner += val;
-                }
-                std::string outFileName_inner = "CC_retrain_inner";
+                // 截断
+                // if (i > 0 && std::abs(max_u - temp_u) <= 0.001 && j != n_parties) {
+                //     LOG(INFO) << "truncated!!!!!";
+                //     break;
+                // }
+                double contribution = temp_u - old_u;
+                sv[idxs[j - 1]] += contribution;
+                old_u = temp_u;
+            }
+            // 记录小样本量的 Shapley 值
+            if ((i+1) % 2 == 0) {
+            // if ((i+1) % 2 == 0) {
+                std::string outFileName_inner = "./exp_result/MC_retrain_error_a9a/MC_retrain_inner";
                 outFileName_inner.append("_n_")
                                 .append(std::to_string(n_parties))
                                 .append("_m_")
@@ -536,43 +390,32 @@ int main(int argc, char** argv){
                 std::ofstream outFile_inner(outFileName_inner);
                 if (outFile_inner.is_open()) {
                     outFile_inner << "sv\t";
-                    for (const auto& val : sv_inner) {
-                        outFile_inner << val << ", ";
+                    double sum_temp = 0;
+                    for (const auto& val : sv) {
+                        outFile_inner << val/(i+1) << ", ";
+                        sum_temp += val/(i+1);
                     }
                     outFile_inner << "\n";
-                    outFile_inner << "sum_sv\t" << sum_sv_inner << "\n";
+                    outFile_inner << "sum_sv\t" << sum_temp << "\n";
                     outFile_inner.close();
                 } else {
                     LOG(ERROR) << "unable to write file";
                 }
             }
-        }   // end 样本
-
-        LOG(INFO) << "utility " << utility;
-        LOG(INFO) << "count " << count;
-
-        for (int i = 1; i <= n_parties; i++) {
-            for (int j = 0; j < n_parties; j++) {
-                if (count[i][j] == 0) {
-                    sv[j] += 0;
-                }else {
-                    sv[j] += (utility[i][j] / count[i][j]);
-                }
-            }
         }
         double sum_sv = 0.0;
-        for (double & val : sv) {
-            val /= n_parties;
+        for (double& val : sv) {
+            val /= local_m;
             sum_sv += val;
         }
-
         LOG(INFO) << sv;
         LOG(INFO) << sum_sv;
         auto t_end = timer.now();
         std::chrono::duration<float> used_time = t_end - t_start;
-        LOG(INFO) << "CC_SHAP using time: " << used_time.count() << " s";
+        LOG(INFO) << "MC_SHAP using time:" << used_time.count() << " s";
 
-        std::string outFileName = "CC_retrain";
+        // 写文件
+        std::string outFileName = "MC_retrain";
         outFileName.append("_n_")
                     .append(std::to_string(n_parties))
                     .append("_m_")
@@ -592,6 +435,164 @@ int main(int argc, char** argv){
         } else {
             LOG(ERROR) << "unable to write file";
         }
+
+        /* CC_retrain
+        */
+        // int local_m = 304;
+        // std::vector<double> sv(n_parties, 0.0);
+        // std::vector<int> idxs(n_parties);
+        // std::iota(idxs.begin(), idxs.end(), 0);
+        // std::mt19937 rng(9);
+        // std::uniform_int_distribution<int> dist(1, n_parties);
+        // // 初始化 utility 和 count 矩阵，大小为 (n+1)*n
+        // std::vector<std::vector<double>> utility(fl_param.n_parties + 1, std::vector<double>(n_parties, 0));
+        // std::vector<std::vector<int>> count(fl_param.n_parties + 1, std::vector<int>(n_parties, 0));
+
+        // auto t_start = timer.now();
+        // for (int i = 0; i < local_m; i++) {     // 每个样本
+        //     std::shuffle(idxs.begin(), idxs.end(), rng);
+        //     LOG(INFO) << "\nsample " << i + 1 << "/" << local_m << " " << idxs;
+        //     int j = dist(rng);  // 分割点
+        //     double u_1, u_2;
+        //     LOG(INFO) << j;
+
+        //     std::vector<int> set_1(idxs.begin(), idxs.begin() + j);
+        //     std::vector<int> set_2(idxs.begin() + j, idxs.end());
+
+        //     LOG(INFO) << "set_1" << set_1;
+        //     LOG(INFO) << "set_2" << set_2;
+        //     std::vector<Party> selected_party_1(set_1.size());
+        //     std::vector<Party> selected_party_2(set_2.size());
+            
+        //     // selected_party_1训练
+        //     fl_param.n_parties = set_1.size();
+        //     server.horizontal_init(fl_param);
+        //     for (int k = 0; k < set_1.size(); k++) {
+        //         int _id = parties[set_1[k]].pid;
+        //         DataSet _dataset = parties[set_1[k]].dataset;
+        //         selected_party_1[k].init(_id, _dataset, fl_param);
+        //     }
+        //     trainer.horizontal_fl_trainer(selected_party_1, server, fl_param);
+        //     u_1 = selected_party_1[0].gbdt.predict_score(fl_param.gbdt_param, test_dataset[0]);
+
+        //     // selected_party_2训练
+        //     if (j == n_parties) {
+        //         u_2 = 0;
+        //     } else {
+        //         fl_param.n_parties = set_2.size();
+        //     server.horizontal_init(fl_param);
+        //     for (int k = 0; k < set_2.size(); k++) {
+        //         int _id = parties[set_2[k]].pid;
+        //         DataSet _dataset = parties[set_2[k]].dataset;
+        //         selected_party_2[k].init(_id, _dataset, fl_param);
+        //     }
+        //     trainer.horizontal_fl_trainer(selected_party_2, server, fl_param);
+        //     u_2 = selected_party_2[0].gbdt.predict_score(fl_param.gbdt_param, test_dataset[0]);
+        //     }
+            
+        //     LOG(INFO) << "u_1 " << u_1;
+        //     LOG(INFO) << "u_2 " << u_2;
+
+        //     // 更新效用和计数
+        //     std::vector<int> temp(n_parties, 0);
+        //     for (int k = 0; k < j; k++) {
+        //         temp[idxs[k]] = 1;
+        //     }
+        //     for (int k = 0; k < n_parties; k++) {
+        //         utility[j][k] += temp[k] * (u_1 - u_2);
+        //         count[j][k] += temp[k];
+        //     }
+        //     std::fill(temp.begin(), temp.end(), 0);
+        //     for (int k = j; k < n_parties; k++) {
+        //         temp[idxs[k]] = 1;
+        //     }
+        //     for (int k = 0; k < n_parties; k++) {
+        //         utility[n_parties - j][k] += temp[k] * (u_2 - u_1);
+        //         count[n_parties - j][k] += temp[k];
+        //     }
+
+        //     // 记录小样本 Shapley 值
+        //     // if ((i + 1) % 100 == 0) {
+        //     if ((i + 1) % 2 == 0) {
+        //         std::vector<double> sv_inner(n_parties, 0);
+        //         double sum_sv_inner = 0;
+        //         for (int k = 1; k <= n_parties; k++) {
+        //             for (int p = 0; p < n_parties; p++) {
+        //                 if (count[k][p] == 0) {
+        //                     sv_inner[p] += 0;
+        //                 } else {
+        //                     sv_inner[p] += (utility[k][p] / count[k][p]);
+        //                 }
+        //             }
+        //         }
+        //         for (double & val : sv_inner) {
+        //             val /= n_parties;
+        //             sum_sv_inner += val;
+        //         }
+        //         std::string outFileName_inner = "./exp_result/CC_retrain_time_a9a/CC_retrain_inner";
+        //         outFileName_inner.append("_n_")
+        //                         .append(std::to_string(n_parties))
+        //                         .append("_m_")
+        //                         .append(std::to_string(i + 1));
+        //         std::ofstream outFile_inner(outFileName_inner);
+        //         if (outFile_inner.is_open()) {
+        //             outFile_inner << "sv\t";
+        //             for (const auto& val : sv_inner) {
+        //                 outFile_inner << val << ", ";
+        //             }
+        //             outFile_inner << "\n";
+        //             outFile_inner << "sum_sv\t" << sum_sv_inner << "\n";
+        //             outFile_inner.close();
+        //         } else {
+        //             LOG(ERROR) << "unable to write file";
+        //         }
+        //     }
+        // }   // end 样本
+
+        // LOG(INFO) << "utility " << utility;
+        // LOG(INFO) << "count " << count;
+
+        // for (int i = 1; i <= n_parties; i++) {
+        //     for (int j = 0; j < n_parties; j++) {
+        //         if (count[i][j] == 0) {
+        //             sv[j] += 0;
+        //         }else {
+        //             sv[j] += (utility[i][j] / count[i][j]);
+        //         }
+        //     }
+        // }
+        // double sum_sv = 0.0;
+        // for (double & val : sv) {
+        //     val /= n_parties;
+        //     sum_sv += val;
+        // }
+
+        // LOG(INFO) << sv;
+        // LOG(INFO) << sum_sv;
+        // auto t_end = timer.now();
+        // std::chrono::duration<float> used_time = t_end - t_start;
+        // LOG(INFO) << "CC_SHAP using time: " << used_time.count() << " s";
+
+        // std::string outFileName = "./exp_result/CC_retrain_time_a9a/CC_retrain";
+        // outFileName.append("_n_")
+        //             .append(std::to_string(n_parties))
+        //             .append("_m_")
+        //             .append(std::to_string(local_m));
+        // std::ofstream outFile(outFileName);
+
+        // if (outFile.is_open()) {
+        //     outFile << "sv\t";
+        //     for (const auto& val : sv) {
+        //         outFile << val << ", ";
+        //     }
+        //     outFile << "\n";
+        //     outFile << "sum_sv\t" << sum_sv << "\n";
+        //     outFile << "time\t" << used_time.count() << "s\n";
+
+        //     outFile.close();
+        // } else {
+        //     LOG(ERROR) << "unable to write file";
+        // }
 
         
         /* CCN
